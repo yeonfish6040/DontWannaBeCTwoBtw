@@ -8,8 +8,10 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -36,11 +38,17 @@ type event struct {
 	Command      string    `json:"command,omitempty"`
 	Exe          string    `json:"exe,omitempty"`
 	ProcessError string    `json:"process_error,omitempty"`
+	PPID         string    `json:"ppid,omitempty"`
+	StartTime    string    `json:"start_time,omitempty"`
 	Detection    bool      `json:"detection"`
 }
 type recorder struct {
-	mu  sync.Mutex
-	out *os.File
+	mu      sync.Mutex
+	out     *os.File
+	queue   chan event
+	done    chan struct{}
+	cfg     settings
+	history []event
 }
 
 func (r *recorder) record(ctx context.Context, op, path, dst string, off int64, length int, detection bool) {
@@ -64,11 +72,25 @@ func (r *recorder) record(ctx context.Context, op, path, dst string, off int64, 
 	} else {
 		e.ProcessError = "FUSE caller unavailable"
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if err := json.NewEncoder(r.out).Encode(e); err != nil {
-		log.Printf("event log: %v", err)
+	if e.PID > 0 {
+		stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", e.PID))
+		if err == nil {
+			tail := strings.LastIndex(string(stat), ")")
+			if tail >= 0 {
+				fields := strings.Fields(string(stat)[tail+1:])
+				if len(fields) > 19 {
+					e.PPID = fields[1]
+					e.StartTime = fields[19]
+				}
+			}
+		}
 	}
+	select {
+	case r.queue <- e:
+	default:
+		log.Print("event queue full: event dropped")
+	}
+
 }
 
 type root struct {
@@ -140,6 +162,7 @@ func main() {
 	mount := flag.String("mountpoint", "", "empty directory to mount")
 	name := flag.String("filename", "access.log", "decoy filename")
 	logPath := flag.String("log", "", "JSONL event log outside mountpoint")
+	configPath := flag.String("config", "", "optional JSON configuration")
 	flag.Parse()
 	if *mount == "" || *logPath == "" || *name == "." || *name == ".." || filepath.Base(*name) != *name || strings.Contains(*name, "/") {
 		log.Fatal("provide -mountpoint, -log, and a valid -filename")
@@ -161,7 +184,39 @@ func main() {
 		log.Fatal(err)
 	}
 	defer out.Close()
-	r := &root{name: *name, rec: &recorder{out: out}}
+	cfg := settings{MaxLogBytes: 64 << 20, Queue: 1024, History: 64, TimeoutSeconds: 5}
+	if *configPath != "" {
+		b, err := os.ReadFile(*configPath)
+		if err != nil {
+			log.Fatal(err)
+		}
+		dec := json.NewDecoder(strings.NewReader(string(b)))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&cfg); err != nil {
+			log.Fatal(err)
+		}
+	}
+	if cfg.MaxLogBytes < 4096 || cfg.Queue < 1 || cfg.Queue > 65536 || cfg.History < 0 || cfg.History > 1024 || cfg.TimeoutSeconds < 1 || cfg.TimeoutSeconds > 60 {
+		log.Fatal("invalid resource limits")
+	}
+	if len(cfg.Command) > 0 {
+		if !filepath.IsAbs(cfg.Command[0]) {
+			log.Fatal("hook executable must be absolute")
+		}
+		allowed := false
+		for _, v := range cfg.AllowExecutables {
+			if v == cfg.Command[0] {
+				allowed = true
+			}
+		}
+		if !allowed {
+			log.Fatal("hook executable is not allowlisted")
+		}
+	}
+	rec := &recorder{out: out, queue: make(chan event, cfg.Queue), done: make(chan struct{}), cfg: cfg}
+	go rec.run()
+	defer func() { close(rec.queue); <-rec.done }()
+	r := &root{name: *name, rec: rec}
 	server, err := fs.Mount(m, r, &fs.Options{MountOptions: fuse.MountOptions{FsName: "dwbc", Name: "dwbc", DisableXAttrs: true}})
 	if err != nil {
 		log.Fatal(err)
@@ -177,5 +232,69 @@ func main() {
 			log.Printf("unmount: %v", err)
 		}
 	case <-done:
+	}
+}
+
+type settings struct {
+	MaxLogBytes      int64    `json:"max_log_bytes"`
+	Queue            int      `json:"queue"`
+	History          int      `json:"history"`
+	TimeoutSeconds   int      `json:"timeout_seconds"`
+	Command          []string `json:"command"`
+	AllowExecutables []string `json:"allow_executables"`
+}
+
+// A single worker bounds concurrent evidence/action work. Event payloads never
+// become shell arguments; hooks receive JSON through standard input.
+func (r *recorder) run() {
+	defer close(r.done)
+	lastAction := time.Time{}
+	for e := range r.queue {
+		b, err := json.Marshal(e)
+		if err != nil {
+			continue
+		}
+		b = append(b, '\n')
+		info, err := r.out.Stat()
+		if err != nil {
+			log.Printf("stat log: %v", err)
+			continue
+		}
+		if info.Size()+int64(len(b)) > r.cfg.MaxLogBytes {
+			if err := r.out.Truncate(0); err != nil {
+				log.Printf("truncate log: %v", err)
+				continue
+			}
+		}
+		r.mu.Lock()
+		_, err = r.out.Write(b)
+		r.mu.Unlock()
+		if err != nil {
+			log.Printf("write log: %v", err)
+		}
+		if r.cfg.History > 0 {
+			r.history = append(r.history, e)
+			if len(r.history) > r.cfg.History {
+				r.history = r.history[1:]
+			}
+		}
+		if e.Detection {
+			if err := r.out.Sync(); err != nil {
+				log.Printf("sync: %v", err)
+			}
+			if len(r.cfg.Command) > 0 && time.Since(lastAction) >= time.Second {
+				lastAction = time.Now()
+				ctx, cancel := context.WithTimeout(context.Background(), time.Duration(r.cfg.TimeoutSeconds)*time.Second)
+				cmd := exec.CommandContext(ctx, r.cfg.Command[0], r.cfg.Command[1:]...)
+				cmd.Env = []string{"PATH=/usr/bin:/bin", "LANG=C"}
+				cmd.Stdin = strings.NewReader(string(b))
+				cmd.Stdout = io.Discard
+				cmd.Stderr = io.Discard
+				if err := cmd.Run(); err != nil {
+					log.Printf("hook: %v", err)
+				}
+				cancel()
+			}
+		}
 	}
 }

@@ -28,3 +28,21 @@ Reads generate bytes on demand and are logged as JSONL with time, caller PID/UID
 ## Status
 
 The generator has unit tests; Linux cross-compilation has been checked. Actual FUSE integration, `grep`, `sed -i`, `mv`, shutdown under load, and security review are outstanding. Do not deploy as a sole detection control.
+
+## Bounded event processing and explicit hooks
+
+Pass `-config examples/config.json` to set event queue capacity, history capacity,
+log byte limit, and action timeout. Events are enqueued without waiting for disk;
+queue saturation drops events and emits a diagnostic to stderr. A single worker
+writes events and runs hooks. The log is truncated when its configured byte limit
+would be exceeded: this bounds storage but intentionally loses older evidence.
+This is not archival rotation. Export and retain logs separately when required.
+
+A hook is an explicit `command` array with an absolute executable path that also
+appears in `allow_executables`. No shell interpolation is performed. JSON arrives
+on stdin, output is discarded, and only PATH and LANG are inherited. Calls are
+limited to one per second with a configured timeout. Only configure trusted hooks;
+this is not a sandbox and a hook must manage any subprocesses it creates. Network
+transmission occurs only if an operator explicitly configures such a hook.
+
+Linux mount checks are in `tests/integration.sh` and run in GitHub Actions.
