@@ -19,15 +19,15 @@ Reads generate bytes on demand and are logged as JSONL with time, caller PID/UID
 
 ## Limitations and operational risks
 
-- This prototype has not been tested on a real Linux FUSE mount. Unsupported operations, such as links, are not all logged. A syscall rejected by the kernel before it reaches FUSE cannot be observed. Scans that exclude the mount or stop before reaching an address are not detected.
+- Linux container FUSE mount smoke tests pass. Unsupported operations, such as links, are not all logged. A syscall rejected by the kernel before it reaches FUSE cannot be observed. Scans that exclude the mount or stop before reaching an address are not detected.
 - Direct I/O reduces page-cache bypass of read callbacks, but FUSE does not provide a complete audit trail. A process may exit or its PID may be reused before `/proc` is read; command and executable fields are best-effort and may refer to a different process. Permissions and PID namespaces affect attribution. No process tree, command line or evidence dump is collected.
-- Logs contain potentially sensitive process and filesystem data. Store them in a protected location, set retention and access controls, and review legal requirements. Existing log files retain their existing permissions. There is no rotation, redaction, queue, rate limit, external forwarding or action system; sustained reads can fill disk or block the filesystem. Read events are not necessarily malicious.
-- There is no configuration file, overlay mode, event hooks or resource limits. An attacker with root or sufficient mount privileges can disable or bypass this service, change its logs or unmount it. Remote monitoring and independent operating system auditing are needed for stronger assurance.
+- Logs contain potentially sensitive process and filesystem data. Store them in a protected location, set retention and access controls, and review legal requirements. Existing log files retain their existing permissions. Queue and log limits are configurable; saturation can drop events. There is no redaction or built-in remote forwarding. Read events are not necessarily malicious.
+- JSON configuration and bounded explicit command hooks are available; overlay mode and evidence dumps remain absent. An attacker with root or sufficient mount privileges can disable or bypass this service, change its logs or unmount it. Remote monitoring and independent operating system auditing are needed for stronger assurance.
 - A full scan generates and transfers over 61 GB. Random offsets are supported. This synthetic file contains no real access history; an event alone does not prove compromise or C2 activity.
 
 ## Status
 
-The generator has unit tests; Linux cross-compilation has been checked. Actual FUSE integration, `grep`, `sed -i`, `mv`, shutdown under load, and security review are outstanding. Do not deploy as a sole detection control.
+The generator has unit tests; Linux cross-compilation has been checked. Linux FUSE mount, read, truncate, chmod, mv, temporary creation and normal shutdown checks pass in a privileged Linux container. Full sed workflows, shutdown under load and security review are outstanding. Do not deploy as a sole detection control.
 
 ## Bounded event processing and explicit hooks
 
