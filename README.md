@@ -20,14 +20,14 @@ Reads generate bytes on demand and are logged as JSONL with time, caller PID/UID
 ## Limitations and operational risks
 
 - Linux container FUSE mount smoke tests pass. Unsupported operations, such as links, are not all logged. A syscall rejected by the kernel before it reaches FUSE cannot be observed. Scans that exclude the mount or stop before reaching an address are not detected.
-- Direct I/O reduces page-cache bypass of read callbacks, but FUSE does not provide a complete audit trail. A process may exit or its PID may be reused before `/proc` is read; command and executable fields are best-effort and may refer to a different process. Permissions and PID namespaces affect attribution. No process tree, command line or evidence dump is collected.
+- Direct I/O reduces page-cache bypass of read callbacks, but FUSE does not provide a complete audit trail. A process may exit or its PID may be reused before `/proc` is read; command and executable fields are best-effort and may refer to a different process. Permissions and PID namespaces affect attribution. Opt-in evidence includes bounded ancestry and fully masked command-line arguments.
 - Logs contain potentially sensitive process and filesystem data. Store them in a protected location, set retention and access controls, and review legal requirements. Existing log files retain their existing permissions. Queue and log limits are configurable; saturation can drop events. There is no redaction or built-in remote forwarding. Read events are not necessarily malicious.
-- JSON configuration and bounded explicit command hooks are available; overlay mode and evidence dumps remain absent. An attacker with root or sufficient mount privileges can disable or bypass this service, change its logs or unmount it. Remote monitoring and independent operating system auditing are needed for stronger assurance.
+- JSON configuration and bounded explicit command hooks are available; overlay mode is not supported; detection-first mode rejects mutations. An attacker with root or sufficient mount privileges can disable or bypass this service, change its logs or unmount it. Remote monitoring and independent operating system auditing are needed for stronger assurance.
 - A full scan generates and transfers over 61 GB. Random offsets are supported. This synthetic file contains no real access history; an event alone does not prove compromise or C2 activity.
 
 ## Status
 
-The generator has unit tests; Linux cross-compilation has been checked. Linux FUSE mount, read, truncate, chmod, mv, temporary creation and normal shutdown checks pass in a privileged Linux container. Full sed workflows, shutdown under load and security review are outstanding. Do not deploy as a sole detection control.
+The generator has unit tests; Linux cross-compilation has been checked. Linux FUSE mount, read, truncate, chmod, mv, temporary creation and normal shutdown checks pass in a privileged Linux container. GNU sed -i temporary creation denial and concurrent readers are also tested. Independent security review and extended load testing remain advisable. Do not deploy as a sole detection control.
 
 ## Bounded event processing and explicit hooks
 
@@ -46,3 +46,18 @@ this is not a sandbox and a hook must manage any subprocesses it creates. Networ
 transmission occurs only if an operator explicitly configures such a hook.
 
 Linux mount checks are in `tests/integration.sh` and run in GitHub Actions.
+
+## Reproducible Docker verification
+
+Run `make docker-test` on a Linux Docker engine with `/dev/fuse` available. This
+builds `tests/Dockerfile` and runs race-enabled unit tests, vet and actual FUSE
+integration checks, including `sed -i`, symlink attempts, concurrent readers,
+evidence generation and shutdown. SYS_ADMIN and the FUSE device are granted to
+the test container only. The container does not mount a host directory.
+
+Set `evidence_dir` to an existing private directory outside the mount and set
+`max_evidence` to a file count limit. JSON evidence contains the triggering event,
+a bounded recent event history, process ancestry and virtual file size. Procfs
+metadata capture checks start time before and after reads; missing/exited
+processes produce an explicit error. All command-line arguments are redacted.
+Hooks now use a separate process group so timeout terminates the group.

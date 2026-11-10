@@ -4,5 +4,7 @@
   "history": 64,
   "timeout_seconds": 5,
   "command": [],
-  "allow_executables": []
+  "allow_executables": [],
+  "evidence_dir": "",
+  "max_evidence": 128
 }
