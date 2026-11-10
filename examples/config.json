@@ -1,0 +1,10 @@
+{
+  "max_log_bytes": 67108864,
+  "queue": 1024,
+  "history": 64,
+  "timeout_seconds": 5,
+  "command": [],
+  "allow_executables": [],
+  "evidence_dir": "",
+  "max_evidence": 128
+}
